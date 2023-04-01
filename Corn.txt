@@ -1,0 +1,13 @@
+from crontab import CronTab
+
+# Create a cron job object
+cron = CronTab(user='username')
+
+# Create a new job
+job = cron.new(command='python /path/to/app.py')
+
+# Set the job to run every day from 8am to 5pm
+job.setall('0 8-17 * * *')
+
+# Save the job to the cron tab
+cron.write()

@@ -1,0 +1,142 @@
+from flask import Flask, jsonify
+import requests
+import pandas as pd
+import numpy as np
+from sklearn.preprocessing import MinMaxScaler
+from keras.models import Sequential
+from keras.layers import Dense, LSTM, Dropout
+from datetime import datetime, timedelta
+import alpaca_trade_api as tradeapi
+
+app = Flask(__name__)
+
+# API credentials
+api_key = 'YOUR_API_KEY'
+api_secret = 'YOUR_API_SECRET_KEY'
+base_url = 'https://paper-api.alpaca.markets'
+
+# Create an API object
+api = tradeapi.REST(api_key, api_secret, base_url)
+
+# Set the maximum amount of shares to trade
+max_shares = 100
+
+# Function to buy stocks
+def buy_stock(symbol, shares):
+    try:
+        api.submit_order(
+            symbol=symbol,
+            qty=shares,
+            side='buy',
+            type='market',
+            time_in_force='gtc'
+        )
+        return True
+    except:
+        return False
+
+# Function to sell stocks
+def sell_stock(symbol, shares):
+    try:
+        api.submit_order(
+            symbol=symbol,
+            qty=shares,
+            side='sell',
+            type='market',
+            time_in_force='gtc'
+        )
+        return True
+    except:
+        return False
+
+@app.route('/')
+def home():
+    return 'Welcome to the Stock Price Prediction API'
+
+@app.route('/predict/<symbol>')
+def predict(symbol):
+    # Download stock data
+    timeframe = '1Min'
+    end_date = datetime.utcnow()
+    start_date = end_date - timedelta(days=1)
+
+    barset = api.get_barset(symbol, timeframe, start=start_date, end=end_date)
+    stock_bars = barset[symbol]
+
+    # Preprocessing
+    scaler = MinMaxScaler(feature_range=(0, 1))
+    scaled_data = scaler.fit_transform(pd.DataFrame({'Close': [bar.c for bar in stock_bars]}))
+
+    # Training data
+    prediction_days = 24 * 60
+    x_train = []
+    y_train = []
+
+    for x in range(prediction_days, len(scaled_data)):
+        x_train.append(scaled_data[x-prediction_days:x, 0])
+        y_train.append(scaled_data[x, 0])
+
+    x_train, y_train = np.array(x_train), np.array(y_train)
+    x_train = np.reshape(x_train, (x_train.shape[0], x_train.shape[1], 1))
+
+    # LSTM Model
+    model = Sequential()
+    model.add(LSTM(units=50, return_sequences=True, input_shape=(x_train.shape[1], 1)))
+    model.add(Dropout(0.2))
+    model.add(LSTM(units=50, return_sequences=True))
+    model.add(Dropout(0.2))
+    model.add(LSTM(units=50))
+    model.add(Dropout(0.2))
+    model.add(Dense(units=1))
+
+    model.compile(optimizer='adam', loss='mean_squared_error')
+    model.fit(x_train, y_train, epochs=25, batch_size=32)
+
+    test_start = datetime.utcnow() - timedelta(minutes=prediction_days)
+    test_end = datetime.utcnow()
+    test_data = api.get_barset(symbol, timeframe, start=test_start, end=test_end)[symbol]
+    actual_prices = np.array([bar.c for bar in test_data]).reshape(-1, 1)
+    total_dataset = pd.concat((pd.DataFrame({'Close': [bar.c for bar in stock_bars]}), pd.DataFrame({'Close': [bar.c for bar in test_data]})), axis=0)
+    model_inputs = total_dataset[len(total_dataset)-len(test_data)-prediction_days:].values
+    model_inputs = scaler.transform(model_inputs)
+
+    # Prediction
+    x_test = []
+
+    for x in range(prediction_days, len(model_inputs)):
+        x_test.append(model_inputs[x-prediction_days:x, 0])
+
+    x_test = np.array(x_test)
+    x_test = np.reshape(x_test, (x_test.shape[0], x_test.shape[1], 1))
+    predicted_prices = model.predict(x_test)
+    predicted_prices = scaler.inverse_transform(predicted_prices)
+
+    # Buy or sell based on predicted prices
+    current_position = api.get_position(symbol)
+
+    if current_position:
+        # If there's a current position, sell if predicted price is lower than current price
+        if predicted_prices[-1] < current_position.current_price:
+            sell_shares = min(int(current_position.qty), max_shares)
+            sell_stock(symbol, sell_shares)
+    else:
+        # If there's no current position, buy if predicted price is higher than current price
+        current_price = api.get_last_trade(symbol).price
+
+        if predicted_prices[-1] > current_price:
+            buy_shares = min(int(api.get_account().cash / current_price), max_shares)
+            buy_stock(symbol, buy_shares)
+
+    # Output prediction in JSON format
+    prediction_output = []
+    for i in range(len(actual_prices)):
+        prediction_output.append({
+            'timestamp': test_data[i].t.timestamp(),
+            'actual_price': float(actual_prices[i]),
+            'predicted_price': float(predicted_prices[i])
+        })
+
+    return jsonify(prediction_output)
+
+if __name__ == '__main__':
+    app.run()
