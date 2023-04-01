@@ -53,6 +53,11 @@ def sell_stock(symbol, shares):
 def home():
     return 'Welcome to the Stock Price Prediction API'
 
+@app.route('/run-colab')
+def run_colab():
+	gdown.download('https://colab.research.google.com/drive/1HRmN-qfFSMhcHlWqALq4nYDZMHwhRjwF?usp=sharing', 'tradingBot.ipynb', quiet=False)
+	return jsonify(message='colab notebook ran successfully')
+
 @app.route('/predict/<symbol>')
 def predict(symbol):
     # Download stock data
